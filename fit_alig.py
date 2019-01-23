@@ -1,5 +1,3 @@
-
-
 import ROOT
 import root_numpy
 import numpy as np
@@ -12,7 +10,7 @@ import scipy as sp
 sns.set_context("talk")
 
 
-
+#import data from ROOT file
 file_name = "AnalysisResults.root"
 tree_name = "electron_informationAllTriggers_"
 
@@ -26,7 +24,7 @@ electrons_nocuts = pd.DataFrame(electrons)
 electrons = pd.DataFrame(electrons)
 
 
-#cuts
+#cuts - select the electrons with resonable cuts
 min_TPC_nsig = -1.0
 max_TPC_nsig = 3.0
 eta_res_cut = 0.1
@@ -57,25 +55,31 @@ is_eta_cut = (np.absolute(electrons['eta_cluster'])> eta_clus_min) & (np.absolut
 is_TPC_PID = (electrons['n_sigma_electron_TPC'] >= min_TPC_nsig) & (electrons['n_sigma_electron_TPC'] <= max_TPC_nsig)
 electrons = electrons[is_TPC_PID & is_e_over_p & is_eta_cut]
 
-
+#Eta (the pseudorapitity) is not implemented on numpy. Short implementation
 def Eta(x,y,z):
     cos_theta = z/np.sqrt(x**2 + y ** 2 + z ** 2)
     eta = -0.5* np.log((1.0-cos_theta)/(1.0+cos_theta) )
     return eta
 
+#Calculate the position of the tracks on the calorimeter
 electrons['phi_track_emc'] = np.arctan2(electrons['y_track'],electrons['x_track'])
 electrons['eta_track_emc'] = Eta(electrons['x_track'], electrons['y_track'], electrons['z_track'])
 
+#Calculate the trend of the matching to the calorimeter
 def calculate_residuals(df):
     df['x_res'] = df['x_track'] - df['x_cluster']
     df['y_res'] = df['y_track'] - df['y_cluster']
     df['z_res'] = df['z_track'] - df['z_cluster']
     df['phi_res'] = df['phi_track_emc'] - df['phi_cluster']
     df['eta_res'] = df['eta_track_emc'] - df['eta_cluster']
+    
 calculate_residuals(electrons)
+
+#remove very bad matches
 electrons = electrons[np.abs(electrons['phi_res'])<0.05]
 electrons = electrons[np.abs(electrons['eta_res'])<0.05]
 
+#implement the rotation matrix as in ALICE
 def rotation_matrix(psi, theta, phi):
     'angles in degrees, copied from the ALICE convetion'
     psi = np.radians(psi)
@@ -102,6 +106,7 @@ def rotation_matrix(psi, theta, phi):
     
     return rot.reshape(3,3)
 
+#apply the translation and the rotation at the same time
 def translation_rotation(X,cluster_postions,track_postions):
     rot = rotation_matrix(X[0],X[1],X[2])
     translation = np.array([X[3],X[4],X[5]])
@@ -109,51 +114,51 @@ def translation_rotation(X,cluster_postions,track_postions):
     residuals = np.sqrt((residuals**2).sum(axis=1))
     return residuals
 
-sm = 0
-electrons_sm = electrons[electrons['super_module_number']==sm].copy()
-electrons_sm = electrons_sm[electrons_sm['charge']>0].copy()
-track_postions = np.array(pd.DataFrame([electrons_sm['x_track'],electrons_sm['y_track'],electrons_sm['z_track']]).T)
-cluster_postions = np.array(pd.DataFrame([electrons_sm['x_cluster'],electrons_sm['y_cluster'],electrons_sm['z_cluster']]).T)
+results_of_opt = list()
+
+for sm in range(0,18):
+    electrons_sm = electrons[electrons['super_module_number']==sm].copy()
+    electrons_sm = electrons_sm[electrons_sm['charge']>0].copy()
+    track_postions = np.array(pd.DataFrame([electrons_sm['x_track'],electrons_sm['y_track'],electrons_sm['z_track']]).T)
+    cluster_postions = np.array(pd.DataFrame([electrons_sm['x_cluster'],electrons_sm['y_cluster'],electrons_sm['z_cluster']]).T)
 
 
-initial_guess = (1.0,1.0,1.0,electrons_sm['x_res'].mean(),electrons_sm['y_res'].mean(),electrons_sm['z_res'].mean())
-OptimizeResult = sp.optimize.least_squares(translation_rotation,initial_guess,args=(cluster_postions,track_postions))
+    initial_guess = (1.0,1.0,1.0,electrons_sm['x_res'].mean(),electrons_sm['y_res'].mean(),electrons_sm['z_res'].mean())
+    OptimizeResult = sp.optimize.least_squares(translation_rotation,initial_guess,args=(cluster_postions,track_postions))
+    results_of_opt.append(OptimizeResult)
+    
+    print(OptimizeResult.x)
 
-print(OptimizeResult.x)
+    no_alig = [0.,0.,0.,0.,0.,0.]
 
-print(OptimizeResult.x)
+    fig, ax = plt.subplots()
+    points = translation_rotation(no_alig,cluster_postions,track_postions)
+    ax.hist(points,bins=100)
+    ax.set_yscale('log')
 
-no_alig = [0,0,0,0,0,0]
-
-fig, ax = plt.subplots()
-points = translation_rotation(no_alig,cluster_postions,track_postions)
-print((points**2).sum())
-ax.hist(points,bins=100)
-ax.set_yscale('log')
-
-fig, ax = plt.subplots()
-points = translation_rotation(OptimizeResult.x,cluster_postions,track_postions)
-ax.hist(points,bins=100)
-print((points**2).sum())
-ax.set_yscale('log')
+    fig, ax = plt.subplots()
+    points = translation_rotation(OptimizeResult.x,cluster_postions,track_postions)
+    ax.hist(points,bins=100)
+    print((points**2).sum())
+    ax.set_yscale('log')
 
 
-def alig_clusters(X,cluster_postions):
-    rot = rotation_matrix(X[0],X[1],X[2])
-    translation = np.array([X[3],X[4],X[5]])
-    new_positions = np.dot(cluster_postions,rot)+translation
-    return new_positions
+    def alig_clusters(X,cluster_postions):
+        rot = rotation_matrix(X[0],X[1],X[2])
+        translation = np.array([X[3],X[4],X[5]])
+        new_positions = np.dot(cluster_postions,rot)+translation
+        return new_positions
 
-calculate_residuals(electrons_sm)
+    calculate_residuals(electrons_sm)
 
-p = alig_clusters(OptimizeResult.x,cluster_postions)
-frame = pd.DataFrame(p)
-electrons_sm = electrons[electrons['super_module_number']==sm].copy()
-electrons_sm['x_track'] = frame[0]
-electrons_sm['y_track'] = frame[1]
-electrons_sm['z_track'] = frame[2]
+    temp_p = alig_clusters(OptimizeResult.x,cluster_postions)
+    frame = pd.DataFrame(temp_p)
+    electrons_sm = electrons[electrons['super_module_number']==sm].copy()
+    electrons_sm['x_track'] = frame[0]
+    electrons_sm['y_track'] = frame[1]
+    electrons_sm['z_track'] = frame[2]
 
 
-values = electrons_sm.groupby(['super_module_number', 'charge']).mean()
-errors = electrons_sm.groupby(['super_module_number', 'charge']).std()/np.sqrt(electrons_sm.groupby(['super_module_number', 'charge']).count())
-errors_percent = np.absolute(errors/values)
+    values = electrons_sm.groupby(['super_module_number', 'charge']).mean()
+    errors = electrons_sm.groupby(['super_module_number', 'charge']).std()/np.sqrt(electrons_sm.groupby(['super_module_number', 'charge']).count())
+    errors_percent = np.absolute(errors/values)
